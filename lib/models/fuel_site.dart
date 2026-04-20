@@ -17,10 +17,13 @@ class FuelSite {
 
   factory FuelSite.fromJson(Map<String, dynamic> json) {
     return FuelSite(
-      siteId: json['S'] as int,
-      name: json['N'] as String,
-      address: json['A'] as String,
-      brand: json['B'] as String,
+      // Use .toString() instead of 'as String' for IDs and Brands
+      siteId: int.tryParse(json['S'].toString()) ?? 0,
+      name: json['N']?.toString() ?? 'Unknown Station',
+      address: json['A']?.toString() ?? 'Unknown Address',
+      brand: json['B']?.toString() ?? 'Unknown Brand',
+
+      // Use (num).toDouble() to safely handle both 150 (int) and 150.5 (double)
       lat: (json['Lat'] as num).toDouble(),
       lng: (json['Lng'] as num).toDouble(),
     );

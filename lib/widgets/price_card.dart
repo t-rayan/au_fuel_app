@@ -38,7 +38,7 @@ class PriceCard extends StatelessWidget {
           crossAxisAlignment: CrossAxisAlignment.end,
           children: [
             Text(
-              "${station.price.toStringAsFixed(1) ?? 'N/A'}¢",
+              "${station.price?.toStringAsFixed(1) ?? 'N/A'}¢",
               style: const TextStyle(
                 color: Color(0xFFFFD700),
                 fontSize: 20,

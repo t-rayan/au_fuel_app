@@ -13,11 +13,11 @@ class FuelPrice {
 
   factory FuelPrice.fromJson(Map<String, dynamic> json) {
     return FuelPrice(
-      siteId: json['S'] as int,
-      fuelId: json['F'] as int,
-      price: (json['P'] as num).toDouble(),
-      // The API often provides a UTC string; we parse it to local time
-      lastUpdated: DateTime.parse(json['U'] as String).toLocal(),
+      siteId: int.tryParse(json['SiteId']?.toString() ?? json['S']?.toString() ?? '0') ?? 0,
+      fuelId: int.tryParse(json['FuelId']?.toString() ?? json['F']?.toString() ?? '0') ?? 0,
+      price: ((json['Price'] ?? json['P'] ?? 0) as num).toDouble(),
+      // Handle the Date String
+      lastUpdated: DateTime.parse((json['TransactionDateUtc'] ?? json['U'] ?? DateTime.now().toIso8601String()).toString()).toLocal(),
     );
   }
 }

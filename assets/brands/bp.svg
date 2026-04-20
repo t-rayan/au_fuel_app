@@ -1,0 +1,8 @@
+<svg viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg">
+  <!-- BP Green and Yellow Sun -->
+  <circle cx="50" cy="50" r="45" fill="#00AA44"/>
+  <circle cx="50" cy="50" r="30" fill="#FFD700"/>
+  <circle cx="50" cy="50" r="20" fill="#00AA44"/>
+  <!-- BP initials -->
+  <text x="50" y="60" font-size="24" font-weight="bold" fill="#FFD700" text-anchor="middle" font-family="Arial">BP</text>
+</svg>

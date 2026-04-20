@@ -1,83 +1,135 @@
 import 'dart:convert';
 import 'package:au_fuel/core/api_config.dart';
-import 'package:flutter/services.dart';
+import 'package:au_fuel/models/fuel_price.dart';
+import 'package:au_fuel/models/fuel_site.dart';
+import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
 import '../models/fuel_station.dart';
+
 import '../models/fuel_type.dart';
 
 class FuelService {
-  final String authToken = 'f477b753-ce77-4aac-8b50-b72775f3fbc4';
-  final String fuelTypesUrl =
-      'https://fppdirectapi-prod.fuelpricesqld.com.au/Subscriber/GetCountryFuelTypes?countryId=21';
-
-  Future<List<FuelStation>> getRealTimeData() async {
+  Future<List<FuelStation>> getRealTimeData(int selectedFuelId) async {
     try {
-      // 1. Fetch Site Details
       final sitesUrl = Uri.parse(
         "${ApiConfig.baseUrl}/Subscriber/GetFullSiteDetails?countryId=21&geoRegionLevel=3&geoRegionId=1",
       );
-      final sitesResponse = await http.get(
-        sitesUrl,
-        headers: ApiConfig.headers,
-      );
-
-      // 2. Fetch Prices
       final pricesUrl = Uri.parse(
         "${ApiConfig.baseUrl}/Price/GetSitesPrices?countryId=21&geoRegionLevel=3&geoRegionId=1",
       );
-      final pricesResponse = await http.get(
-        pricesUrl,
-        headers: ApiConfig.headers,
-      );
+
+      // Perform both requests
+      final responses = await Future.wait([
+        http.get(sitesUrl, headers: ApiConfig.headers),
+        http.get(pricesUrl, headers: ApiConfig.headers),
+      ]);
+
+      final sitesResponse = responses[0];
+      final pricesResponse = responses[1];
 
       if (sitesResponse.statusCode == 200 && pricesResponse.statusCode == 200) {
         final sitesData = json.decode(sitesResponse.body);
         final pricesData = json.decode(pricesResponse.body);
 
-        // This is where we will "Merge" the two lists based on SiteId
-        return _mergeSitesAndPrices(sitesData, pricesData);
+        // 2. PASS the lists and the selected ID to the merge function
+        // Note: QLD API typically wraps the list in keys like 'S' (Sites) and 'SitePrices'
+        return _mergeSitesAndPrices(
+          sitesData['S'] ?? [],
+          pricesData['SitePrices'] ?? [],
+          selectedFuelId,
+        );
       } else {
-        throw Exception("API Error: ${sitesResponse.statusCode}");
+        throw Exception("API Error");
       }
     } catch (e) {
-      print("Error fetching fuel data: $e");
-      return []; // Return empty list on failure to prevent app crash
+      debugPrint("Error fetching fuel data: $e");
+      return [];
     }
   }
 
   List<FuelStation> _mergeSitesAndPrices(
-    dynamic sitesJson,
-    dynamic pricesJson,
+    List<dynamic> sitesJson,
+    List<dynamic> pricesJson,
+    int selectedFuelId,
   ) {
-    // We will implement the merge logic here next!
-    return [];
+    // 3. Convert JSON to Model Lists first
+    final List<FuelSite> sites = sitesJson
+        .map((s) => FuelSite.fromJson(s))
+        .toList();
+    final List<FuelPrice> prices = pricesJson
+        .map((p) => FuelPrice.fromJson(p))
+        .toList();
+
+    // 4. Filter prices to ONLY the fuel type the user wants
+    final filteredPrices = prices
+        .where((p) => p.fuelId == selectedFuelId)
+        .toList();
+
+    // 5. Map SiteId -> Price for O(1) instant lookup
+    final priceMap = {for (var p in filteredPrices) p.siteId: p};
+
+    // 6. Create the final FuelStation list
+    return sites
+        .map((site) {
+          final priceData = priceMap[site.siteId];
+
+          return FuelStation(
+            siteId: site.siteId,
+            name: site.name,
+            brand: site.brand,
+            address: site.address,
+            lat: site.lat,
+            lng: site.lng,
+            price: priceData?.price,
+            lastUpdated: priceData?.lastUpdated,
+          );
+        })
+        .where((station) => station.price != null)
+        .toList();
   }
 
-  // This function returns a List of our Model objects
-
-  // this function loads fuel types from the API and returns a list of FuelType objects
-
   Future<List<FuelType>> getFuelTypes() async {
+    final fuelTypesUrl =
+        '${ApiConfig.baseUrl}/Subscriber/GetCountryFuelTypes?countryId=21';
+
     try {
       final response = await http.get(
         Uri.parse(fuelTypesUrl),
-        headers: {
-          'Authorization': 'FPDAPI SubscriberToken=$authToken',
-          'Accept': 'application/json',
-        },
+        headers: ApiConfig.headers,
       );
+      debugPrint("🔥 RESPONSECODE: Data received: ${response.statusCode}");
 
       if (response.statusCode == 200) {
-        print("Fuel types loaded successfully!");
         final data = json.decode(response.body);
         List<dynamic> fuelList = data['Fuels'];
-        return fuelList.map((json) => FuelType.fromAPI(json)).toList();
+
+        // Desired IDs and Names mapping for Australian popular fuels
+        const Map<int, String> popularFuels = {
+          2: '91',
+          12: 'E10',
+          5: 'U95',
+          8: 'U98',
+          3: 'Diesel',
+          14: 'Premium Diesel',
+          4: 'LPG',
+        };
+
+        List<FuelType> parsedFuels = [];
+        for (var item in fuelList) {
+          int id = item['FuelId'];
+          if (popularFuels.containsKey(id)) {
+            parsedFuels.add(FuelType(fuelId: id, name: popularFuels[id]!));
+          }
+        }
+        return parsedFuels;
       } else {
-        print("Failed to load fuel types. Status code: ${response.statusCode}");
+        debugPrint(
+          "CODEOFERROR: Failed to load fuel types. Status code: ${response.statusCode}",
+        );
         return [];
       }
     } catch (e) {
-      print("Error loading fuel types: $e");
+      debugPrint("CODEOFERROR: Error loading fuel types: $e");
       return [];
     }
   }
