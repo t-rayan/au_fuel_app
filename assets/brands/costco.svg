@@ -1,6 +1,0 @@
-<svg viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg">
-  <!-- Costco Dark Blue -->
-  <circle cx="50" cy="50" r="45" fill="white" stroke="#003DA5" stroke-width="2"/>
-  <circle cx="50" cy="50" r="35" fill="none" stroke="#003DA5" stroke-width="3"/>
-  <text x="50" y="65" font-size="28" font-weight="bold" fill="#003DA5" text-anchor="middle" font-family="Arial">C</text>
-</svg>

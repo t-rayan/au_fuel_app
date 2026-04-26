@@ -84,7 +84,6 @@ class FuelService {
             lastUpdated: priceData?.lastUpdated,
           );
         })
-        .where((station) => station.price != null)
         .toList();
   }
 

@@ -1,0 +1,17 @@
+<svg width="300" height="200" viewBox="0 0 300 200" xmlns="http://www.w3.org/2000/svg">
+  <!-- Background -->
+  <rect width="100%" height="100%" fill="#1678A2"/>
+
+  <!-- Red triangle -->
+  <polygon points="180,40 260,40 180,110" fill="#FF2B2B"/>
+
+  <!-- Text -->
+  <text x="50%" y="150" text-anchor="middle"
+        font-family="Arial, Helvetica, sans-serif"
+        font-size="48"
+        font-style="italic"
+        font-weight="700"
+        fill="#E6E6E6">
+    United
+  </text>
+</svg>

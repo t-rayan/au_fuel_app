@@ -1,44 +1,49 @@
-import 'package:au_fuel/models/fuel_type.dart';
 import 'package:flutter/material.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:google_maps_flutter/google_maps_flutter.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 
-import '../services/fuel_service.dart';
 import '../models/fuel_station.dart';
-import '../utils/marker_generator.dart';
+import '../models/fuel_type.dart';
 import '../widgets/station_card.dart';
+import '../providers/fuel_provider.dart';
+import '../providers/marker_provider.dart';
+import '../providers/locality_provider.dart';
 
-class MapScreen extends StatefulWidget {
+class MapScreen extends ConsumerStatefulWidget {
   const MapScreen({super.key});
 
   @override
-  State<MapScreen> createState() => _MapScreenState();
+  ConsumerState<MapScreen> createState() => _MapScreenState();
 }
 
-class _MapScreenState extends State<MapScreen> {
-  final FuelService _fuelService = FuelService();
+class _MapScreenState extends ConsumerState<MapScreen> {
+  final TextEditingController _searchController = TextEditingController();
+  GoogleMapController? _mapController;
 
-  // state variables
-  Set<Marker> _markers = {};
-  List<FuelType> _allFuelTypes = [];
-  int? _selectedFuelId; // Maps fuelId to fuel name for easy lookup
-  FuelStation? _selectedStation; // Track currently tapped marker
-  List<FuelStation> _cachedStations = []; // Fixes UI lag
-  Map<String, BitmapDescriptor> _priceMarkerCache =
-      {}; // Fixes OOM memory crashes & rendering lag
+  static const LatLng _initialPosition = LatLng(-27.5750, 153.0850);
 
-  String _getFormattedPrice(FuelStation station) {
-    return (station.price != null && station.price! < 9000)
-        ? '\$${(station.price! / 1000).toStringAsFixed(2)}'
-        : 'N/A';
+  @override
+  void initState() {
+    super.initState();
+    _determinePosition();
+    
+    // Set default fuel ID once fuel types are loaded
+    WidgetsBinding.instance.addPostFrameCallback((_) async {
+      final fuelTypes = await ref.read(fuelTypesProvider.future);
+      if (fuelTypes.isNotEmpty && ref.read(selectedFuelIdProvider) == null) {
+        ref.read(selectedFuelIdProvider.notifier).state = fuelTypes.first.fuelId;
+      }
+    });
   }
 
-  bool _isLoading = true; // Tracks background processing for UI feedback
-  final TextEditingController _searchController =
-      TextEditingController(); // Search interactions
-  String _searchQuery = ""; // Current search filter
-  GoogleMapController?
-  _mapController; // Map tracking for custom location panning
+  Future<void> _zoomIn() async {
+    _mapController?.animateCamera(CameraUpdate.zoomIn());
+  }
+
+  Future<void> _zoomOut() async {
+    _mapController?.animateCamera(CameraUpdate.zoomOut());
+  }
 
   Future<void> _goToMyLocation() async {
     try {
@@ -58,426 +63,307 @@ class _MapScreenState extends State<MapScreen> {
     }
   }
 
-  // Coordinates for Eight Mile Plains / Wishart area
-  static const LatLng _initialPosition = LatLng(-27.5750, 153.0850);
-  @override
-  void initState() {
-    super.initState();
-    // Trigger the check as soon as the widget is created
-    _determinePosition();
-    _initialFuelData(); // Call the API to load fuel types (currently just prints to console)
-  }
-
-  Future<void> _initialFuelData() async {
-    debugPrint("🔥 STEP: Calling getFuelTypes()");
-
-    final fuelTypeData = await _fuelService.getFuelTypes();
-    debugPrint("🔥 STEP: Data received: ${fuelTypeData.length}");
-
-    setState(() {
-      _allFuelTypes = fuelTypeData;
-      if (_allFuelTypes.isNotEmpty) {
-        _selectedFuelId =
-            _allFuelTypes.first.fuelId; // Default to first fuel type
-      }
-    });
-
-    if (_selectedFuelId != null) {
-      _loadFuelMarkers(); // Load markers for the default fuel type
-    }
-  }
-
   Future<void> _determinePosition() async {
     bool serviceEnabled;
     LocationPermission permission;
 
-    // 1. Check if location services are enabled
     serviceEnabled = await Geolocator.isLocationServiceEnabled();
-    if (!serviceEnabled) {
-      // Direct the user to turn on their GPS
-      return Future.error('Location services are disabled.');
-    }
+    if (!serviceEnabled) return;
 
-    // 2. Check current permission status
     permission = await Geolocator.checkPermission();
-
     if (permission == LocationPermission.denied) {
-      // 3. THIS IS THE STEP THAT SHOWS THE POPUP
       permission = await Geolocator.requestPermission();
-
-      if (permission == LocationPermission.denied) {
-        return Future.error('Location permissions are denied');
-      }
+      if (permission == LocationPermission.denied) return;
     }
 
-    if (permission == LocationPermission.deniedForever) {
-      // The user tapped "Don't ask again" - they must go to settings manually
-      return Future.error('Location permissions are permanently denied.');
-    }
-
-    // 4. If we get here, permissions are granted!
-    // Calling setState tells the GoogleMap widget to redraw and show the blue dot.
+    if (permission == LocationPermission.deniedForever) return;
     setState(() {});
   }
 
-  void _clearSelection() {
-    if (_selectedStation != null) {
-      final oldStation = _selectedStation!;
-      setState(() {
-        _selectedStation = null;
-        final String oldPriceStr = _getFormattedPrice(oldStation);
-        final String oldCacheKey =
-            '${oldPriceStr}_${oldStation.brand}'; // Include brand in cache key
-        if (_priceMarkerCache.containsKey(oldCacheKey)) {
-          _markers.removeWhere(
-            (m) => m.markerId.value == oldStation.siteId.toString(),
-          );
-          _markers.add(
-            Marker(
-              markerId: MarkerId(oldStation.siteId.toString()),
-              position: LatLng(oldStation.lat, oldStation.lng),
-              icon: _priceMarkerCache[oldCacheKey]!,
-              onTap: () => _onMarkerTapped(oldStation),
-            ),
-          );
-        }
-      });
-    }
-  }
-
-  Future<void> _onMarkerTapped(FuelStation newStation) async {
-    final oldStation = _selectedStation;
-
-    // Draw the new highlighted pin instantly
-    final String priceString = _getFormattedPrice(newStation);
-    final BitmapDescriptor highlightedIcon =
-        await MarkerGenerator.createPriceMarker(priceString, isSelected: true);
-
-    setState(() {
-      _selectedStation = newStation;
-
-      // Bring old station back to normal cached state
-      if (oldStation != null && oldStation.siteId != newStation.siteId) {
-        final String oldPriceStr = _getFormattedPrice(oldStation);
-        final String oldCacheKey =
-            '${oldPriceStr}_${oldStation.brand}'; // Include brand in cache key
-        if (_priceMarkerCache.containsKey(oldCacheKey)) {
-          _markers.removeWhere(
-            (m) => m.markerId.value == oldStation.siteId.toString(),
-          );
-          _markers.add(
-            Marker(
-              markerId: MarkerId(oldStation.siteId.toString()),
-              position: LatLng(oldStation.lat, oldStation.lng),
-              icon: _priceMarkerCache[oldCacheKey]!,
-              onTap: () => _onMarkerTapped(oldStation),
-            ),
-          );
-        }
-      }
-
-      // Highlight tapped station and bring to front
-      _markers.removeWhere(
-        (m) => m.markerId.value == newStation.siteId.toString(),
-      );
-      _markers.add(
-        Marker(
-          markerId: MarkerId(newStation.siteId.toString()),
-          position: LatLng(newStation.lat, newStation.lng),
-          icon: highlightedIcon,
-          zIndex: 1.0,
-          onTap: () => _onMarkerTapped(newStation),
-        ),
-      );
-    });
-  }
-
-  Future<void> _loadFuelMarkers() async {
-    final bool isNetworkHit = _cachedStations.isEmpty;
-
-    if (isNetworkHit) {
-      // Instantly wipe map and show loader ONLY when hitting network
-      setState(() {
-        _isLoading = true;
-        _markers.clear();
-        _selectedStation = null;
-      });
-      _cachedStations = await _fuelService.getRealTimeData(_selectedFuelId!);
-    }
-
-    Set<Marker> newMarkers = {};
-
-    for (var station in _cachedStations) {
-      // Fast RAM filtering based on search bar
-      if (_searchQuery.isNotEmpty) {
-        final matchesName = station.name.toLowerCase().contains(_searchQuery);
-        final matchesAddress = station.address.toLowerCase().contains(
-          _searchQuery,
-        );
-        final matchesBrand = station.brand.toLowerCase().contains(_searchQuery);
-        if (!matchesName && !matchesAddress && !matchesBrand) continue;
-      }
-      final bool isSelected = _selectedStation?.siteId == station.siteId;
-
-      BitmapDescriptor customIcon;
-
-      if (isSelected) {
-        // Render selected specifically on demand
-        final String priceString = _getFormattedPrice(station);
-        customIcon = await MarkerGenerator.createPriceMarker(
-          priceString,
-          isSelected: true,
-        );
-      } else {
-        // Cache globally by the rendered text rather than by the unique site ID to save 95% of memory and CPU
-        final String priceString = _getFormattedPrice(station);
-        final String cacheKey = priceString;
-        if (_priceMarkerCache.containsKey(cacheKey)) {
-          customIcon = _priceMarkerCache[cacheKey]!;
-        } else {
-          customIcon = await MarkerGenerator.createPriceMarker(
-            priceString,
-            isSelected: false,
-          );
-          _priceMarkerCache[cacheKey] = customIcon;
-        }
-      }
-
-      newMarkers.add(
-        Marker(
-          markerId: MarkerId(station.siteId.toString()),
-          position: LatLng(station.lat, station.lng),
-          icon: customIcon,
-          onTap: () => _onMarkerTapped(station),
-        ),
-      );
-    }
-
-    setState(() {
-      _markers = newMarkers;
-      _isLoading = false; // Hide loader
-    });
+  Future<void> _loadMapStyle() async {
+    final String style = await DefaultAssetBundle.of(context).loadString('assets/map_style.json');
+    _mapController?.setMapStyle(style);
   }
 
   @override
   Widget build(BuildContext context) {
+    // 1. Observe State from Providers
+    final markers = ref.watch(markerProvider);
+    final fuelTypesAsync = ref.watch(fuelTypesProvider);
+    final selectedFuelId = ref.watch(selectedFuelIdProvider);
+    final selectedStation = ref.watch(selectedStationProvider);
+    final searchQuery = ref.watch(searchQueryProvider);
+
     return Scaffold(
+      backgroundColor: const Color(0xFFF8F9FA), 
       body: Stack(
         children: [
           GoogleMap(
-            // Shifts Google's internal UI controls (like My Location) down to avoid the Search Bar and Chips
             padding: EdgeInsets.only(
-              top: MediaQuery.of(context).padding.top + 120,
+              top: MediaQuery.of(context).padding.top + 130, // Increased for search bar
+              bottom: selectedStation != null ? 220 : 20,
             ),
             initialCameraPosition: const CameraPosition(
               target: _initialPosition,
-              zoom: 14.0,
+              zoom: 13.5,
             ),
-            // This makes the map interactive
             myLocationEnabled: true,
-            myLocationButtonEnabled:
-                false, // Turned off to use our custom bottom-right layout
-            zoomControlsEnabled:
-                true, // Native zoom controls usually sit at the bottom right
-            markers: _markers,
+            myLocationButtonEnabled: false,
+            zoomControlsEnabled: false,
+            markers: markers,
             mapType: MapType.normal,
             onMapCreated: (GoogleMapController controller) {
               _mapController = controller;
+              _loadMapStyle();
             },
-            onTap: (_) => _clearSelection(),
+            onTap: (_) => ref.read(selectedStationProvider.notifier).state = null,
           ),
 
-          // Top UI Overlay (Search Bar + Filter Chips)
           Positioned(
             top: MediaQuery.of(context).padding.top + 16,
             left: 0,
             right: 0,
             child: Column(
               mainAxisSize: MainAxisSize.min,
-              crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                // Search Bar
+                // Premium Search Bar
                 Padding(
-                  padding: const EdgeInsets.symmetric(horizontal: 16),
-                  child: Container(
-                    height: 48,
-                    decoration: BoxDecoration(
-                      color: Colors.white,
-                      borderRadius: BorderRadius.circular(24),
-                      boxShadow: const [
-                        BoxShadow(
-                          color: Colors.black12,
-                          blurRadius: 8,
-                          offset: Offset(0, 3),
+                  padding: const EdgeInsets.symmetric(horizontal: 20),
+                  child: Column(
+                    children: [
+                      Container(
+                        height: 52,
+                        decoration: BoxDecoration(
+                          color: Colors.white,
+                          borderRadius: BorderRadius.circular(16),
+                          border: Border.all(color: const Color(0xFFE9ECEF), width: 1.5),
+                          boxShadow: [
+                            BoxShadow(
+                              color: Colors.black.withOpacity(0.08),
+                              blurRadius: 12,
+                              offset: const Offset(0, 4),
+                            ),
+                          ],
                         ),
-                      ],
-                    ),
-                    child: TextField(
-                      controller: _searchController,
-                      textAlignVertical: TextAlignVertical.center,
-                      decoration: InputDecoration(
-                        hintText: 'Search brand or suburb...',
-                        hintStyle: const TextStyle(
-                          color: Colors.grey,
-                          fontSize: 14,
+                        child: TextField(
+                          controller: _searchController,
+                          textAlignVertical: TextAlignVertical.center,
+                          style: const TextStyle(fontWeight: FontWeight.w600, color: Color(0xFF212529)),
+                          decoration: InputDecoration(
+                            hintText: 'Search suburb or postcode...',
+                            hintStyle: TextStyle(color: Colors.black.withOpacity(0.4), fontSize: 14, fontWeight: FontWeight.normal),
+                            prefixIcon: const Icon(Icons.search, color: Color(0xFF0D4D44), size: 22),
+                            border: InputBorder.none,
+                            contentPadding: const EdgeInsets.symmetric(horizontal: 16),
+                            suffixIcon: searchQuery.isNotEmpty
+                                ? IconButton(
+                                    icon: const Icon(Icons.close, size: 18, color: Colors.grey),
+                                    onPressed: () {
+                                      _searchController.clear();
+                                      ref.read(searchQueryProvider.notifier).state = "";
+                                    },
+                                  )
+                                : null,
+                          ),
+                          onChanged: (val) {
+                            ref.read(searchQueryProvider.notifier).state = val;
+                          },
                         ),
-                        prefixIcon: const Icon(
-                          Icons.search,
-                          color: Color(0xFF035E50),
-                        ),
-                        border: InputBorder.none,
-                        contentPadding: const EdgeInsets.symmetric(
-                          horizontal: 16,
-                        ),
-                        suffixIcon: _searchQuery.isNotEmpty
-                            ? IconButton(
-                                icon: const Icon(
-                                  Icons.clear,
-                                  size: 20,
-                                  color: Colors.grey,
-                                ),
-                                onPressed: () {
-                                  _searchController.clear();
-                                  setState(() => _searchQuery = "");
-                                  _loadFuelMarkers();
-                                },
-                              )
-                            : null,
                       ),
-                      onChanged: (val) {
-                        setState(() => _searchQuery = val.toLowerCase());
-                        _loadFuelMarkers(); // Fast RAM redraw
-                      },
-                    ),
+                      
+                      // Suggestions Overlay
+                      Builder(
+                        builder: (context) {
+                          final suggestions = ref.watch(localitySuggestionsProvider);
+                          if (suggestions.isEmpty) return const SizedBox.shrink();
+                          
+                          return Container(
+                            margin: const EdgeInsets.only(top: 4),
+                            width: double.infinity,
+                            decoration: BoxDecoration(
+                              color: Colors.white,
+                              borderRadius: BorderRadius.circular(16),
+                              boxShadow: [
+                                BoxShadow(
+                                  color: Colors.black.withOpacity(0.1),
+                                  blurRadius: 15,
+                                  offset: const Offset(0, 8),
+                                ),
+                              ],
+                            ),
+                            child: Column(
+                              mainAxisSize: MainAxisSize.min,
+                              children: suggestions.map((locality) => ListTile(
+                                leading: const Icon(Icons.location_on_outlined, size: 18, color: Color(0xFF0D4D44)),
+                                title: Text(
+                                  locality.displayName,
+                                  style: const TextStyle(
+                                    fontWeight: FontWeight.w700,
+                                    fontSize: 14,
+                                    color: Colors.black, // Explicit black as requested
+                                  ),
+                                ),
+                                onTap: () {
+                                  // 1. Mark as selected in state
+                                  ref.read(selectedLocalityProvider.notifier).state = locality;
+                                  
+                                  // 2. Update search bar text
+                                  _searchController.text = locality.displayName;
+                                  ref.read(searchQueryProvider.notifier).state = locality.displayName;
+                                  
+                                  // 3. Move Camera to the selected locality
+                                  _mapController?.animateCamera(
+                                    CameraUpdate.newLatLngZoom(
+                                      LatLng(locality.lat, locality.lng),
+                                      13.0, // Zoom in to suburb level
+                                    ),
+                                  );
+
+                                  FocusScope.of(context).unfocus();
+                                },
+                                dense: true,
+                              )).toList(),
+                            ),
+                          );
+                        },
+                      ),
+                    ],
                   ),
                 ),
-                const SizedBox(height: 12),
+                const SizedBox(height: 16),
 
-                // Horizontal scrollable fuel filters
-                SingleChildScrollView(
-                  scrollDirection: Axis.horizontal,
-                  padding: const EdgeInsets.symmetric(horizontal: 16),
-                  child: Row(
-                    children: _allFuelTypes.map((fuel) {
-                      final bool isSelected = _selectedFuelId == fuel.fuelId;
-                      return Padding(
-                        padding: const EdgeInsets.only(right: 8),
-                        child: ChoiceChip(
-                          label: Text(
-                            fuel.name == 'Premium Diesel'
-                                ? 'PDiesel'
-                                : fuel.name,
-                          ),
-                          selected: isSelected,
-                          onSelected: (val) {
-                            if (!isSelected) {
-                              setState(() {
-                                _selectedFuelId = fuel.fuelId;
-                                _cachedStations = []; // force network load
-                                _priceMarkerCache.clear();
-                              });
-                              _loadFuelMarkers();
-                            }
-                          },
-                          showCheckmark: false,
-                          selectedColor: const Color(0xFF035E50),
-                          backgroundColor: Colors.white,
-                          labelStyle: TextStyle(
-                            color: isSelected
-                                ? Colors.white
-                                : const Color(0xFF3C4043),
-                            fontWeight: isSelected
-                                ? FontWeight.w600
-                                : FontWeight.w500,
-                            fontSize: 13,
-                          ),
-                          shape: RoundedRectangleBorder(
-                            borderRadius: BorderRadius.circular(20),
-                            side: BorderSide(
-                              color: isSelected
-                                  ? const Color(0xFF035E50)
-                                  : const Color(0xFFDADCE0),
-                              width: 1,
+                // High-Contrast Fuel Filters
+                fuelTypesAsync.when(
+                  data: (types) => SingleChildScrollView(
+                    scrollDirection: Axis.horizontal,
+                    physics: const BouncingScrollPhysics(),
+                    padding: const EdgeInsets.symmetric(horizontal: 20),
+                    child: Row(
+                      children: types.map((fuel) {
+                        final bool isSelected = selectedFuelId == fuel.fuelId;
+                        return Padding(
+                          padding: const EdgeInsets.only(right: 10),
+                          child: ChoiceChip(
+                            label: Text(
+                              fuel.name == 'Premium Diesel' ? 'PDiesel' : fuel.name,
                             ),
+                            selected: isSelected,
+                            onSelected: (val) {
+                              if (!isSelected) {
+                                ref.read(selectedFuelIdProvider.notifier).state = fuel.fuelId;
+                              }
+                            },
+                            showCheckmark: false,
+                            selectedColor: const Color(0xFF0D4D44),
+                            backgroundColor: Colors.white,
+                            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                            labelStyle: TextStyle(
+                              color: isSelected ? Colors.white : const Color(0xFF495057),
+                              fontWeight: isSelected ? FontWeight.w800 : FontWeight.w600,
+                              fontSize: 13,
+                            ),
+                            shape: RoundedRectangleBorder(
+                              borderRadius: BorderRadius.circular(12),
+                              side: BorderSide(
+                                color: isSelected ? const Color(0xFF0D4D44) : const Color(0xFFE9ECEF),
+                                width: 1.5,
+                              ),
+                            ),
+                            elevation: 0,
+                            pressElevation: 0,
                           ),
-                          elevation: 2,
-                          pressElevation: 0,
-                        ),
-                      );
-                    }).toList(),
+                        );
+                      }).toList(),
+                    ),
                   ),
+                  loading: () => const SizedBox.shrink(),
+                  error: (_, __) => const SizedBox.shrink(),
                 ),
               ],
             ),
           ),
 
-          // Loading Overlay
-          if (_isLoading)
-            Align(
-              alignment: Alignment.topCenter,
-              child: Padding(
-                padding: EdgeInsets.only(
-                  top: MediaQuery.of(context).padding.top + 16,
-                ),
-                child: const Card(
-                  elevation: 4,
-                  shape: StadiumBorder(),
-                  color: Colors.white,
+          // Loading Overlay (Bottom Center)
+          ref.watch(fuelStationsProvider).when(
+                loading: () => Align(
+                  alignment: Alignment.bottomCenter,
                   child: Padding(
-                    padding: EdgeInsets.symmetric(horizontal: 20, vertical: 12),
-                    child: Row(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        SizedBox(
-                          height: 16,
-                          width: 16,
-                          child: CircularProgressIndicator(
-                            strokeWidth: 2,
-                            color: Color(0xFF035E50),
-                          ),
+                    padding: const EdgeInsets.only(bottom: 100),
+                    child: Card(
+                      elevation: 6,
+                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(30)),
+                      color: Colors.white,
+                      child: Padding(
+                        padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 14),
+                        child: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            const SizedBox(
+                              height: 18,
+                              width: 18,
+                              child: CircularProgressIndicator(
+                                strokeWidth: 2.5,
+                                color: Color(0xFF035E50),
+                              ),
+                            ),
+                            const SizedBox(width: 16),
+                            const Text(
+                              "Finding best prices...",
+                              style: TextStyle(
+                                fontWeight: FontWeight.bold,
+                                fontSize: 14,
+                                color: Color(0xFF2C3E38),
+                              ),
+                            ),
+                          ],
                         ),
-                        SizedBox(width: 12),
-                        Text(
-                          "Locating stations...",
-                          style: TextStyle(
-                            fontWeight: FontWeight.bold,
-                            color: Color(0xFF2C3E38),
-                          ),
-                        ),
-                      ],
+                      ),
                     ),
                   ),
                 ),
+                data: (_) => const SizedBox.shrink(),
+                error: (_, __) => const SizedBox.shrink(),
               ),
-            ),
 
-          // Custom Overlay Card replacing default infoWindow
-          if (_selectedStation != null)
+          // Custom Zoom and Location Controls (Middle Right)
+          Positioned(
+            right: 12,
+            top: MediaQuery.of(context).size.height / 2 - 80,
+            child: Column(
+              children: [
+                FloatingActionButton.small(
+                  onPressed: _zoomIn,
+                  backgroundColor: Colors.white,
+                  heroTag: 'zoom_in',
+                  child: const Icon(Icons.add, color: Color(0xFF2C3E38)),
+                ),
+                const SizedBox(height: 8),
+                FloatingActionButton.small(
+                  onPressed: _zoomOut,
+                  backgroundColor: Colors.white,
+                  heroTag: 'zoom_out',
+                  child: const Icon(Icons.remove, color: Color(0xFF2C3E38)),
+                ),
+                const SizedBox(height: 16),
+                FloatingActionButton.small(
+                  onPressed: _goToMyLocation,
+                  backgroundColor: Colors.white,
+                  heroTag: 'my_location',
+                  child: const Icon(Icons.my_location, color: Colors.blueAccent),
+                ),
+              ],
+            ),
+          ),
+
+          // Custom Overlay Card (Bottom Center)
+          if (selectedStation != null)
             Align(
               alignment: Alignment.bottomCenter,
               child: StationCard(
-                station: _selectedStation!,
-                onClose: _clearSelection,
+                station: selectedStation,
+                onClose: () => ref.read(selectedStationProvider.notifier).state = null,
               ),
             ),
-
-          // Custom Location Button specifically hovering above zoom controls
-          AnimatedPositioned(
-            duration: const Duration(milliseconds: 200),
-            curve: Curves.easeInOut,
-            bottom: _selectedStation != null
-                ? 180
-                : 120, // Moves up cleanly when the StationCard opens
-            right: 12,
-            child: FloatingActionButton(
-              mini: true,
-              backgroundColor: Colors.white,
-              onPressed: _goToMyLocation,
-              elevation: 4,
-              heroTag: 'my_location',
-              child: const Icon(Icons.my_location, color: Colors.blueAccent),
-            ),
-          ),
         ],
       ),
     );
